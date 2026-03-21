@@ -1,0 +1,36 @@
+##Pre-processing raw Plate2 reads
+##Trim-galore script with fastqc
+
+##Navigate to your directory
+
+cd /mnt/colston/microworkshop/asherc/
+
+##Activate the trim-galore conda environment
+
+conda activate trim-galore2
+
+##Run trim galore
+
+trim_galore -q 20 --fastqc -o trimmed_plate2_reads /mnt/colston/microworkshop/data/raw_data/plate2_pre-trimmed_raw_fastq_files/*.fastq.gz
+    #run in screen: screen -S preposs
+
+##After script is finished, clean up output
+
+screen -r preposs #check to ensure it finished
+exit 
+cd trimmed_plate2_reads/
+
+mkdir trimmed_fastqc_results
+
+mv *fastqc* trimmed_fastqc_results/
+    #mv: error message presented: "cannot move 'trimmed_fastqc_results' to a subdirectory of itself, 'trimmed_fastqc_results/trimmed_fastqc_results'", but the command seemed to work regardless
+
+mv *trimming_report* trimmed_fastqc_results/
+
+##Raw reads ending in *.fq.gz are ready for qiime2
+    #available at: /mnt/colston/microworkshop/asherc/trimmed_plate2_reads
+
+cd ..
+cp -r /mnt/colston/microworkshop/data/trimmed_data/plate1_184_samp_dataset/ .
+nano BothPlates_Total_Metadata_2026_03_13b.csv #copied and pasted raw code from UPRM_QIIME2workshop of same name
+#This has metadata for all samples, but I noticed that File_Name column is missing, so I am halting here for now
