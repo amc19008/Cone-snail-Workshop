@@ -8,4 +8,6 @@
 
 #We had copy over plate 1 data (trimmed) and plate 2 (untrimmed). 
 
-#Trim-galore run on plate 2 fastq files:
+#Trim-galore run on plate 2 fastq files (See Pre-processing_Plate2)
+
+#Next the samples were divided based on amplicon seq marker (16S and 18S) in respective directories.
