@@ -1,0 +1,68 @@
+#For 16S:
+pwd 
+	#/mnt/colston/microworkshop/asherc/post_filtering/
+
+conda activate qiime2-amplicon-2026.1
+
+cd 16S/
+
+sed -i 's/  /\t/g' 16S_manifest.txt
+
+#Recall that each “\” is important to be able to go to the next step without running the full command, otherwise it will be confused and show errors:
+qiime tools import \ 
+--type 'SampleData[SequencesWithQuality]' \ 
+--input-path 16S_manifest.txt \ 
+--output-path 16S_demux_seqs.qza \ 
+--input-format SingleEndFastqManifestPhred33V2
+#For 18S you can sub 16S with 18S where you see it and ensure you’re working from the 18S dir
+
+#in 16S directory
+rm ./16S_1*
+
+cp /mnt/colston/microworkshop/data/trimmed_data/plate1_184_samp_dataset/
+cp /mnt/colston/microworkshop/data/trimmed_data/plate1_184_samp_dataset/16S_12608.1.270220.CAGATCTGACA_trimmed.fq.gz . 
+#Repeated for remaining mismatched samples
+
+#I corrected names and manifest file (sed -i 's/  /\t/g' 16S_manifest.txt), then ran it again and it worked!
+
+qiime tools import \
+> --type 'SampleData[SequencesWithQuality]' \
+> --input-path 16S_manifest.txt \
+> --output-path 16S_demux_seqs.qza \
+> --input-format SingleEndFastqManifestPhred33V2
+
+#output: /mnt/colston/microworkshop/asherc/post_filtering/16S/16S_demux_seqs.qza
+
+qiime demux summarize \ 
+--i-data 16S_demux_seqs.qza \ 
+--o-visualization 16S_demux_seqs.qzv
+
+#output: 16S_demux_seqs.qzv
+#Now we can go to the web view and visualize. First, to download it off the server I open a new window in my local that I can easily reach and plop right in the website. For me, this is the Downloads folder.
+
+rsync -avP colston@136.145.140.122:/mnt/colston/microworkshop/asherc/post_filtering/16S/16S_demux_seqs.qzv ./
+
+https://view.qiime2.org/
+
+#We can see reads dip down at like 240, and that’s the same value used in the tutorial, so we can keep that for our DADA2:
+
+#This step takes a while so if you want, you can run it as a screen by doing the following:
+
+screen -S DADA2
+conda activate qiime2-amplicon-2026.1
+
+qiime dada2 denoise-single \
+--i-demultiplexed-seqs 16S_demux_seqs.qza \
+--p-trim-left 0 \
+--p-trunc-len 240 \
+--o-representative-sequences 16S_asv-seqs.qza \
+--o-table 16S_asv-table.qza \
+--o-denoising-stats 16S_denoising-stats.qza \
+--o-base-transition-stats base-transition-stats.qza
+
+#To exit the screen (detach):
+Ctrl + A, then D
+
+#To return to a screen:
+>screen -r DADA2
+
