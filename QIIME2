@@ -64,5 +64,75 @@ qiime dada2 denoise-single \
 Ctrl + A, then D
 
 #To return to a screen:
->screen -r DADA2
+screen -r DADA2
 
+exit #To kill/terminate screen
+
+#Next we need a database 
+
+cp /mnt/colston/microworkshop/data/qiime2_input/SILVA138.2_SSURef_NR99_uniform_classifier_V4-515f-806r.qza /mnt/colston/microworkshop/asherc/post_filtering/16S/
+
+qiime feature-classifier classify-sklearn \
+--i-classifier SILVA138.2_SSURef_NR99_uniform_classifier_V4-515f-806r.qza \
+--i-reads 16S_asv-seqs.qza \
+--o-classification 16S_taxonomy.qza
+	
+#output: 16S_taxonomy.qza
+
+qiime phylogeny align-to-tree-mafft-fasttree \
+--i-sequences 16S_asv-seqs.qza \
+--o-alignment 16S_asv-seqs.qza \
+--o-masked-alignment masked-aliigned_16S_asv-seqs.qza \
+--o-tree unrooted-tree_16S.qza \
+--o-rooted-tree rooted-tree_16S.qza
+
+qiime feature-table summarize \
+--i-table 16S_asv-table.qza \
+--m-metadata-file 16S_Metadata.txt \
+--o-feature-frequencies feature-frequencies.qza \
+--o-sample-frequencies sample-frequencies.qza \
+--o-summary 16S_asv-table.qzv
+#output: 16S_asv-table.qzv
+
+#If you visualize the last .qzv generated, and select the middle tab (interactive sample detail), then scroll down, you can see the lowest freq. As you can see the lowest is 872, so let’s purge lowest by setting the cutoff to 4440 for this data (example from workshop)
+
+#For the 16S I decided to make the cutoff 12000 so the next command looks like:
+
+qiime diversity core-metrics-phylogenetic \
+--i-phylogeny rooted-tree_16S.qza \
+--i-table 16S_asv-table.qza \
+--p-sampling-depth 12000 \
+--m-metadata-file 16S_Metadata.txt \
+--output-dir diversity-core-metrics-phylogenetic
+
+qiime diversity alpha-group-significance \
+--i-alpha-diversity diversity-core-metrics-phylogenetic/shannon_vector.qza \
+--m-metadata-file 16S_Metadata.txt \
+--o-visualization shannon_group_significance.qzv
+
+#output: Saved Visualization to: shannon_group_significance.qzv
+
+#Beta group significance (Sample_Type Comparison): Unweighted- and Weighted-Unifrac
+qiime diversity beta-group-significance \
+--i-distance-matrix diversity-core-metrics-phylogenetic/unweighted_unifrac_distance_matrix.qza \
+--m-metadata-file 16S_Metadata.txt \
+--m-metadata-column Sample_Type \
+--p-pairwise \
+--o-visualization unweighted_sample_type_group_sig.qzv
+
+#output: Saved Visualization to: unweighted_sample_type_group_sig.qzv
+
+#Taxa barplot for rarefied dataset
+qiime taxa barplot \
+--i-table diversity-core-metrics-phylogenetic/rarefied_table.qza \
+--i-taxonomy 16S_taxonomy.qza \
+--m-metadata-file 16S_Metadata.txt \
+--o-visualization taxa_barplot_rarefied.qzv
+
+#output: Saved Visualization to: taxa_barplot_rarefied.qzv
+
+Location: /mnt/colston/microworkshop/asherc/post_filtering/16S/taxa_barplot_rarefied.qzv
+
+#I’m going to rename so we can differentiate between this one and the 18S one
+
+cp taxa_barplot_rarefied.qzv 16S_taxa_barplot_rarefied.qzv
