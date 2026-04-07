@@ -1,0 +1,11 @@
+#Most of the filtering was conducted manually, using Google sheets
+
+#Of 330 total samples, we selected 110 whole venom glands from the Puerto Nuevo location. 
+#These samples very temporally, so we have data from:
+  Summer 2016
+  Summer 2017
+  Winter 2016
+
+#We had copy over plate 1 data (trimmed) and plate 2 (untrimmed). 
+
+#Trim-galore run on plate 2 fastq files:
