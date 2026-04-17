@@ -1,0 +1,1555 @@
+---
+title: "Group2_18S_ConeSnailMicrobiome"
+author: "AshCoello"
+date: "2026-04-08"
+output: html_document
+---
+
+# =========================================================
+
+# Setup (remember to set up working directory before running) 
+setwd("/Users/ashercoello/Downloads/18S")
+
+# =========================================================
+
+```{r setup, message=FALSE, warning=FALSE}
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+
+cran_packages <- c(
+  "ggplot2",
+  "dplyr",
+  "tidyr",
+  "tibble",
+  "vegan",
+  "rstatix",
+  "ape",
+  "pegas",
+  "scales"
+)
+
+bioc_packages <- c(
+  "phyloseq",
+  "microbiome"
+)
+
+for (pkg in cran_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+  library(pkg, character.only = TRUE)
+}
+```
+
+# =========================================================
+
+# Find files automatically
+
+# =========================================================
+
+```{r find_files}
+all_files <- list.files(recursive = TRUE, full.names = TRUE)
+print(all_files)
+
+find_first_match <- function(patterns, files) {
+  for (pat in patterns) {
+    match <- files[grepl(pat, files, ignore.case = TRUE)]
+    if (length(match) > 0) {
+      return(match[1])
+    }
+  }
+  return(NA)
+}
+
+feature_table_file <- find_first_match(
+  c("18S_asv-table\\.qza$", "table\\.qza$", "feature.*qza$"),
+  all_files
+)
+
+taxonomy_file <- find_first_match(
+  c("taxonomy\\.qza$", "taxonomy.*\\.qza$"),
+  all_files
+)
+
+tree_file <- find_first_match(
+  c("tree\\.qza$", "rooted.*\\.qza$", ".*\\.qza$"),
+  all_files
+)
+
+metadata_file <- find_first_match(
+  c("18S_Metadata\\.txt$", "metadata.*\\.txt$", "metadata.*\\.tsv$", "metadata.*\\.csv$"),
+  all_files
+)
+
+shannon_file <- find_first_match(
+  c("alpha-diversity\\.qza$", "shannon.*\\.qza$"),
+  all_files
+)
+
+bray_file <- find_first_match(
+  c("distance-matrix\\.qza$", "bray.*\\.qza$"),
+  all_files
+)
+
+# This creates the "metadata_df" object the rest of the script is looking for
+metadata_df <- read.table(metadata_file, header = TRUE, sep = "\t", row.names = 1)
+# =========================================================
+
+# Read the metadata
+
+# =========================================================
+
+```{r read_metadata}
+# 1. Re-read the metadata and specify that the first column is the row name
+metadata_df <- read.table(
+  metadata_file, 
+  header = TRUE, 
+  sep = "\t", 
+  row.names = 1,      # This turns the "SUH" column into the ID labels
+  check.names = FALSE
+)
+
+# 2. Check to make sure the row names now look like "SUH125"
+head(rownames(metadata_df))
+
+if (!"Sample_Type" %in% colnames(metadata_df)) {
+  stop("Column 'Sample_Type' not found in metadata.")
+}
+
+metadata_df$Sample_Type <- as.factor(metadata_df$Sample_Type)
+
+print(head(metadata_df))
+print(colnames(metadata_df))
+print(table(metadata_df$Sample_Type))
+```
+
+# ========================================================
+
+# Read the feature table
+
+# =========================================================
+
+```{r read_feature_table}
+library(qiime2R)
+
+# This skips the manual read.table headache
+asv_table <- read_qza(feature_table_file)
+otu_df <- asv_table$data
+
+# Remove taxonomy column if it exists
+if ("taxonomy" %in% colnames(otu_df)) {
+  otu_df <- otu_df[, colnames(otu_df) != "taxonomy", drop = FALSE]
+}
+
+otu_matrix <- as.matrix(otu_df)
+mode(otu_matrix) <- "numeric"
+
+print(dim(otu_matrix))
+print(otu_matrix[1:min(5, nrow(otu_matrix)), 1:min(5, ncol(otu_matrix))])
+```
+
+# ========================================================
+
+# Read Taxonomy
+
+# =========================================================
+
+```{r read_taxonomy}
+
+library(qiime2R)
+
+# 1. Read the taxonomy artifact directly
+tax_qza <- read_qza(taxonomy_file)
+tax_df <- tax_qza$data
+
+# 2. Rename columns to match the rest of your script
+colnames(tax_df)[1] <- "OTU"
+colnames(tax_df)[2] <- "Taxon"
+
+# 3. Clean up the taxonomy string (Optional but recommended)
+# This splits the long "k__Bacteria; p__Proteobacteria..." string into separate columns
+
+print(colnames(tax_df))
+print(head(tax_df))
+
+# Rename first column to OTU regardless of its original name
+colnames(tax_df)[1] <- "OTU"
+
+# Make sure second column is called Taxon
+if (!"Taxon" %in% colnames(tax_df)) {
+  colnames(tax_df)[2] <- "Taxon"
+}
+
+tax_df_clean <- tax_df %>%
+  tidyr::separate(
+    col = Taxon,
+    into = c(
+      "Kingdom",
+      "Phylum",
+      "Class",
+      "Order",
+      "Family",
+      "Genus",
+      "Species"
+    ),
+    sep = ";",
+    fill = "right",
+    extra = "drop"
+  ) %>%
+  mutate(across(
+    c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"),
+    ~ gsub("^\\s*[a-z]__", "", .)
+  )) %>%
+  mutate(across(
+    c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"),
+    ~ trimws(.)
+  ))
+
+rownames(tax_df_clean) <- tax_df_clean$OTU
+
+tax_matrix <- as.matrix(
+  tax_df_clean[, c(
+    "Kingdom",
+    "Phylum",
+    "Class",
+    "Order",
+    "Family",
+    "Genus",
+    "Species"
+  )]
+)
+
+print(dim(tax_matrix))
+print(head(tax_df_clean))
+
+```
+
+# =========================================================
+
+# Read Tree
+
+# =========================================================
+
+```{r read_tree}
+
+library(qiime2R)
+
+# Replace line 231 with this:
+tree_qza <- read_qza(tree_file)
+tree <- tree_qza$data
+
+# Now you can print it or use it in phyloseq
+print(tree)
+
+```
+
+# ========================================================
+
+# Match Taxa with Samples
+
+# =========================================================
+
+```{r match_taxa_samples}
+# 1. Clean up the feature table column names
+colnames(otu_matrix) <- trimws(colnames(otu_matrix))
+
+# 2. Clean up the metadata row names
+rownames(metadata_df) <- trimws(rownames(metadata_df))
+
+# 3. Test the match again
+shared_samples <- intersect(colnames(otu_matrix), rownames(metadata_df))
+length(shared_samples)
+
+shared_taxa <- intersect(rownames(otu_matrix), rownames(tax_matrix))
+
+if (length(shared_taxa) == 0) {
+  stop("No shared taxa between feature table and taxonomy.")
+}
+
+otu_matrix <- otu_matrix[shared_taxa, , drop = FALSE]
+tax_matrix <- tax_matrix[shared_taxa, , drop = FALSE]
+
+shared_samples <- intersect(colnames(otu_matrix), rownames(metadata_df))
+
+if (length(shared_samples) == 0) {
+  stop("No shared samples between feature table and metadata.")
+}
+
+otu_matrix_filtered <- otu_matrix[, shared_samples, drop = FALSE]
+metadata_df_filtered <- metadata_df[shared_samples, , drop = FALSE]
+
+cat("Number of shared taxa:", length(shared_taxa), "\n")
+cat("Number of shared samples:", length(shared_samples), "\n")
+```
+
+# =========================================================
+
+# Load phyloseq
+
+# =========================================================
+
+```{r load_phyloseq}
+
+if (!requireNamespace("phyloseq", quietly = TRUE)) {
+  BiocManager::install("phyloseq", ask = FALSE)
+}
+
+library(phyloseq)
+
+```
+
+# =========================================================
+
+# Phyloseq
+
+# =========================================================
+
+```{r phyloseq}
+
+OTU <- otu_table(otu_matrix_filtered, taxa_are_rows = TRUE)
+TAX <- tax_table(as.matrix(tax_matrix))
+META <- sample_data(metadata_df_filtered)
+TREE <- phy_tree(tree)
+
+physeq <- phyloseq(OTU, TAX, META, TREE)
+
+print(physeq)
+
+```
+
+# =========================================================
+
+# Alpha Diversity (Shannon)
+
+# =========================================================
+
+```{r alpha_diversity_data}
+
+# --- REPLACE THE READ.TABLE BLOCK WITH THIS ---
+
+# Use qiime2R to read the diversity artifact directly
+shannon_qza <- qiime2R::read_qza(shannon_file)
+
+# The actual data is stored in the $data object
+alpha_data <- as.data.frame(shannon_qza$data)
+
+# Rename the column to Shannon for clarity
+colnames(alpha_data)[1] <- "Shannon"
+
+alpha_data <- alpha_data[rownames(alpha_data) %in% rownames(metadata_df_filtered), , drop = FALSE]
+alpha_data$Sample_Type <- metadata_df_filtered[rownames(alpha_data), "Sample_Type"]
+alpha_data$Sample_ID <- rownames(alpha_data)
+
+print(head(alpha_data))
+
+```
+
+```{r alpha_diversity_plot}
+alpha_plot <- ggplot(alpha_data, aes(x = Sample_Type, y = Shannon, fill = Sample_Type)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.15, size = 2, color = "black") +
+  scale_fill_manual(
+    values = c(
+      "Water_Control_MX" = "#00BFC4",
+      "Whole_venom_gland" = "#F8766D"
+    )
+  ) +
+  labs(
+    title = "Alpha Diversity (Shannon Index)",
+    x = "Sample Type",
+    y = "Shannon Diversity"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+print(alpha_plot)
+```
+
+```{r alpha_diversity_stats}
+
+kruskal_test_result <- rstatix::kruskal_test(alpha_data, Shannon ~ Sample_Type)
+print(kruskal_test_result)
+
+```
+
+# =========================================================
+
+# Beta Diversity (Bray-Curtis)
+
+# =========================================================
+
+```{r bray_distance}
+# --- REPLACE THE BRAY_DF READ.TABLE BLOCK WITH THIS ---
+
+# 1. Use qiime2R to read the distance matrix artifact directly
+bray_qza <- qiime2R::read_qza(bray_file)
+
+# 2. Extract the data into a data frame
+bray_df <- as.data.frame(as.matrix(bray_qza$data))
+
+# 3. View the result to ensure it loaded
+print(dim(bray_df))
+
+shared_bray_samples <- intersect(rownames(bray_df), rownames(metadata_df_filtered))
+bray_df <- bray_df[shared_bray_samples, shared_bray_samples, drop = FALSE]
+metadata_bray <- metadata_df_filtered[shared_bray_samples, , drop = FALSE]
+
+bray_mat <- as.matrix(bray_df)
+bray_dist <- as.dist(bray_mat)
+
+print(dim(bray_mat))
+print(bray_mat[1:min(5, nrow(bray_mat)), 1:min(5, ncol(bray_mat))])
+
+```
+
+```{r pcoa_data}
+
+pcoa_ord <- ape::pcoa(bray_dist)
+
+pcoa_vectors <- as.data.frame(pcoa_ord$vectors[, 1:2])
+colnames(pcoa_vectors) <- c("Axis.1", "Axis.2")
+pcoa_vectors$SampleID <- rownames(pcoa_vectors)
+pcoa_vectors$Sample_Type <- metadata_bray[pcoa_vectors$SampleID, "Sample_Type"]
+
+percent_explained_1 <- round(pcoa_ord$values$Relative_eig[1] * 100, 2)
+percent_explained_2 <- round(pcoa_ord$values$Relative_eig[2] * 100, 2)
+
+print(head(pcoa_vectors))
+
+```
+
+```{r pcoa_plot}
+pcoa_plot <- ggplot(
+  pcoa_vectors,
+  aes(x = Axis.1, y = Axis.2, color = Sample_Type, shape = Sample_Type)
+) +
+  geom_point(size = 4) +
+  stat_ellipse(type = "t", level = 0.95) +
+  scale_color_manual(
+    values = c(
+      "Water_Control_MX" = "#00BFC4",
+      "Whole_venom_gland" = "#F8766D"
+    )
+  ) +
+  labs(
+    title = "PCoA of Microbial Communities",
+    subtitle = "Bray-Curtis Dissimilarity",
+    x = paste0("PCoA 1 (", percent_explained_1, "%)"),
+    y = paste0("PCoA 2 (", percent_explained_2, "%)")
+  ) +
+  theme_minimal()
+
+print(pcoa_plot)
+```
+
+```{r permanova}
+
+sample_df <- data.frame(metadata_bray)
+
+permanova_result <- vegan::adonis2(
+  bray_dist ~ Sample_Type,
+  data = sample_df,
+  permutations = 999
+)
+
+print(permanova_result)
+
+```
+
+# =========================================================
+
+# AMOVA
+
+# =========================================================
+
+```{r amova}
+
+sample_df$Sample_Type <- as.factor(sample_df$Sample_Type)
+
+amova_result <- pegas::amova(
+  bray_dist ~ Sample_Type,
+  data = sample_df,
+  nperm = 999
+)
+
+print(amova_result)
+
+```
+
+# =========================================================
+
+# List of Taxonomic Composition at Phylum Level
+
+# =========================================================
+
+```{r list_all_phyla}
+all_phyla <- phyloseq::psmelt(physeq) %>%
+  dplyr::mutate(
+    Phylum = ifelse(is.na(Phylum) | Phylum == "", "Unclassified", Phylum)
+  ) %>%
+  dplyr::distinct(Phylum) %>%
+  dplyr::arrange(Phylum)
+
+print(all_phyla)
+
+cat("Number of unique phyla:", nrow(all_phyla), "\n")
+```
+
+# =========================================================
+
+# Pie Chart Taxonomic Composition at Phylum Level
+
+# =========================================================
+
+```{r phylum_pie_chart, fig.width=10, fig.height=10}
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(RColorBrewer)
+
+phylum_pie_df <- phyloseq::psmelt(physeq) %>%
+  dplyr::mutate(
+    Phylum = ifelse(is.na(Phylum) | Phylum == "", "Unclassified", Phylum)
+  ) %>%
+  dplyr::group_by(Phylum) %>%
+  dplyr::summarise(
+    TotalAbundance = sum(Abundance, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(desc(TotalAbundance))
+
+# Keep only top 10 phyla
+top10_phyla <- phylum_pie_df$Phylum[1:min(10, nrow(phylum_pie_df))]
+
+phylum_pie_df$Phylum <- ifelse(
+  phylum_pie_df$Phylum %in% top10_phyla,
+  phylum_pie_df$Phylum,
+  "Other"
+)
+
+phylum_pie_df <- phylum_pie_df %>%
+  dplyr::group_by(Phylum) %>%
+  dplyr::summarise(
+    TotalAbundance = sum(TotalAbundance),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(desc(TotalAbundance)) %>%
+  dplyr::mutate(
+    Percentage = TotalAbundance / sum(TotalAbundance),
+    Label = paste0(Phylum, " (", scales::percent(Percentage, accuracy = 0.1), ")")
+  )
+
+phylum_pie_chart <- ggplot(
+  phylum_pie_df,
+  aes(x = "", y = TotalAbundance, fill = Phylum)
+) +
+  geom_bar(
+    stat = "identity",
+    width = 1,
+    color = "white"
+  ) +
+  coord_polar(theta = "y") +
+  scale_fill_brewer(palette = "Paired") +
+  labs(
+    title = "Top 10 Phyla Composition",
+    fill = "Phylum"
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 11),
+    legend.position = "right"
+  )
+
+print(phylum_pie_chart)
+```
+
+# =========================================================
+
+# Taxonomic Composition at Phylum Level (Top 10 + Other)
+
+# =========================================================
+
+```{r phylum_plot, fig.width=15, fig.height=9}
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(scales)
+library(RColorBrewer)
+
+physeq_phylum <- phyloseq::tax_glom(physeq, taxrank = "Phylum", NArm = FALSE)
+
+tax_table(physeq_phylum)[, "Phylum"][
+  is.na(tax_table(physeq_phylum)[, "Phylum"])
+] <- "Unclassified"
+
+physeq_phylum_rel <- phyloseq::transform_sample_counts(
+  physeq_phylum,
+  function(x) {
+    if (sum(x) == 0) x else x / sum(x)
+  }
+)
+
+phylum_df <- phyloseq::psmelt(physeq_phylum_rel)
+
+phylum_df$Phylum[is.na(phylum_df$Phylum) | phylum_df$Phylum == ""] <- "Unclassified"
+phylum_df <- phylum_df %>% filter(!is.na(Sample_Type))
+
+# Keep original Sample_Type order
+sample_type_levels <- unique(as.character(sample_data(physeq)$Sample_Type))
+phylum_df$Sample_Type <- factor(phylum_df$Sample_Type, levels = sample_type_levels)
+
+phylum_sums <- phylum_df %>%
+  group_by(Phylum) %>%
+  summarise(Total = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(Total))
+
+top10_phyla <- phylum_sums$Phylum[1:min(10, nrow(phylum_sums))]
+
+phylum_df$Phylum <- ifelse(
+  phylum_df$Phylum %in% top10_phyla,
+  phylum_df$Phylum,
+  "Other"
+)
+
+phylum_summary <- phylum_df %>%
+  group_by(Sample_Type, Phylum) %>%
+  summarise(Abundance = mean(Abundance, na.rm = TRUE), .groups = "drop")
+
+# Force every Sample_Type to appear, even if one is missing
+all_phyla <- unique(phylum_summary$Phylum)
+
+phylum_summary <- phylum_summary %>%
+  tidyr::complete(
+    Sample_Type = factor(sample_type_levels, levels = sample_type_levels),
+    Phylum = all_phyla,
+    fill = list(Abundance = 0)
+  ) %>%
+  group_by(Sample_Type) %>%
+  mutate(TotalSample = sum(Abundance, na.rm = TRUE)) %>%
+  mutate(Abundance = ifelse(TotalSample == 0, 0, Abundance / TotalSample)) %>%
+  ungroup() %>%
+  select(-TotalSample)
+
+# Put Other last in legend
+phylum_levels <- c(sort(setdiff(unique(phylum_summary$Phylum), "Other")), "Other")
+phylum_summary$Phylum <- factor(phylum_summary$Phylum, levels = phylum_levels)
+
+phylum_plot <- ggplot(
+  phylum_summary,
+  aes(x = Sample_Type, y = Abundance, fill = Phylum)
+) +
+  geom_bar(
+    stat = "identity",
+    position = "stack",
+    width = 0.8
+  ) +
+  scale_fill_brewer(palette = "Set3") +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, 1),
+    expand = c(0, 0)
+  ) +
+  labs(
+    title = "Relative Abundance by Phylum (Top 10 + Other)",
+    x = "Sample Type",
+    y = "Relative Abundance (%)",
+    fill = "Phylum"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 20, hjust = 1, size = 14),
+    axis.text.y = element_text(size = 13),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 11),
+    legend.position = "bottom",
+    legend.box = "vertical"
+  ) +
+  guides(fill = guide_legend(nrow = 2, byrow = TRUE))
+
+print(phylum_plot)
+```
+
+# =========================================================
+
+# Taxonomic Composition at Genus Level (Top 10 + Other)
+
+# =========================================================
+
+```{r genus_plot, fig.width=15, fig.height=9}
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(scales)
+library(RColorBrewer)
+
+physeq_genus <- phyloseq::tax_glom(physeq, taxrank = "Genus", NArm = FALSE)
+
+tax_table(physeq_genus)[, "Genus"][
+  is.na(tax_table(physeq_genus)[, "Genus"])
+] <- "Unclassified"
+
+physeq_genus_rel <- phyloseq::transform_sample_counts(
+  physeq_genus,
+  function(x) {
+    if (sum(x) == 0) x else x / sum(x)
+  }
+)
+
+genus_df <- phyloseq::psmelt(physeq_genus_rel)
+
+genus_df$Genus[is.na(genus_df$Genus) | genus_df$Genus == ""] <- "Unclassified"
+genus_df <- genus_df %>% filter(!is.na(Sample_Type))
+
+# Keep original Sample_Type order
+sample_type_levels <- unique(as.character(sample_data(physeq)$Sample_Type))
+genus_df$Sample_Type <- factor(genus_df$Sample_Type, levels = sample_type_levels)
+
+genus_sums <- genus_df %>%
+  group_by(Genus) %>%
+  summarise(Total = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(Total))
+
+top10_genera <- genus_sums$Genus[1:min(10, nrow(genus_sums))]
+
+genus_df$Genus <- ifelse(
+  genus_df$Genus %in% top10_genera,
+  genus_df$Genus,
+  "Other"
+)
+
+genus_summary <- genus_df %>%
+  group_by(Sample_Type, Genus) %>%
+  summarise(Abundance = mean(Abundance, na.rm = TRUE), .groups = "drop")
+
+# Force every Sample_Type to appear, even if one is missing
+all_genera <- unique(genus_summary$Genus)
+
+genus_summary <- genus_summary %>%
+  tidyr::complete(
+    Sample_Type = factor(sample_type_levels, levels = sample_type_levels),
+    Genus = all_genera,
+    fill = list(Abundance = 0)
+  ) %>%
+  group_by(Sample_Type) %>%
+  mutate(TotalSample = sum(Abundance, na.rm = TRUE)) %>%
+  mutate(Abundance = ifelse(TotalSample == 0, 0, Abundance / TotalSample)) %>%
+  ungroup() %>%
+  select(-TotalSample)
+
+# Put Other last in legend
+genus_levels <- c(sort(setdiff(unique(genus_summary$Genus), "Other")), "Other")
+genus_summary$Genus <- factor(genus_summary$Genus, levels = genus_levels)
+
+genus_plot <- ggplot(
+  genus_summary,
+  aes(x = Sample_Type, y = Abundance, fill = Genus)
+) +
+  geom_bar(
+    stat = "identity",
+    position = "stack",
+    width = 0.8
+  ) +
+  scale_fill_brewer(palette = "Set3") +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, 1),
+    expand = c(0, 0)
+  ) +
+  labs(
+    title = "Relative Abundance by Genus (Top 10 + Other)",
+    x = "Sample Type",
+    y = "Relative Abundance (%)",
+    fill = "Genus"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 20, hjust = 1, size = 14),
+    axis.text.y = element_text(size = 13),
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16),
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 11),
+    legend.position = "bottom",
+    legend.box = "vertical"
+  ) +
+  guides(fill = guide_legend(nrow = 2, byrow = TRUE))
+
+print(genus_plot)
+```
+
+# =========================================================
+
+# Heatmap of Relative Abundance at Phylum Level
+
+# =========================================================
+
+```{r HeatmapPhylum1}
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(scales)
+
+# Aggregate at Phylum level
+physeq_heatmap <- phyloseq::tax_glom(physeq, taxrank = "Phylum", NArm = FALSE)
+
+tax_table(physeq_heatmap)[, "Phylum"][
+  is.na(tax_table(physeq_heatmap)[, "Phylum"])
+] <- "Unclassified"
+
+# Convert to relative abundance
+physeq_heatmap_rel <- phyloseq::transform_sample_counts(
+  physeq_heatmap,
+  function(x) {
+    if (sum(x) == 0) x else x / sum(x)
+  }
+)
+
+heatmap_df <- phyloseq::psmelt(physeq_heatmap_rel)
+
+heatmap_df$Phylum[
+  is.na(heatmap_df$Phylum) | heatmap_df$Phylum == ""
+] <- "Unclassified"
+
+# Keep only top 10 phyla overall
+top10_phyla <- heatmap_df %>%
+  group_by(Phylum) %>%
+  summarise(TotalAbundance = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(TotalAbundance)) %>%
+  slice(1:10) %>%
+  pull(Phylum)
+
+heatmap_df <- heatmap_df %>%
+  filter(Phylum %in% top10_phyla)
+
+# Average abundance by Sample_Type and Phylum
+heatmap_summary <- heatmap_df %>%
+  group_by(Sample_Type, Phylum) %>%
+  summarise(
+    Abundance = mean(Abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Keep sample types in original order
+sample_type_levels <- unique(as.character(sample_data(physeq)$Sample_Type))
+heatmap_summary$Sample_Type <- factor(
+  heatmap_summary$Sample_Type,
+  levels = sample_type_levels
+)
+
+# Order phyla by total abundance
+phylum_order <- heatmap_summary %>%
+  group_by(Phylum) %>%
+  summarise(Total = sum(Abundance), .groups = "drop") %>%
+  arrange(desc(Total)) %>%
+  pull(Phylum)
+
+heatmap_summary$Phylum <- factor(
+  heatmap_summary$Phylum,
+  levels = rev(phylum_order)
+)
+
+phylum_heatmap <- ggplot(
+  heatmap_summary,
+  aes(x = Sample_Type, y = Phylum, fill = Abundance)
+) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  scale_fill_gradient(
+    low = "lightyellow",
+    high = "darkred",
+    labels = percent_format(accuracy = 1)
+  ) +
+  labs(
+    title = "Heatmap of Top 10 Phyla Relative Abundance",
+    x = "Sample Type",
+    y = "Phylum",
+    fill = "Relative\nAbundance"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 30, hjust = 1, size = 13),
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10)
+  )
+
+print(phylum_heatmap)
+```
+
+```{r HeatmapPhylum2}
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(scales)
+
+# Aggregate counts at Phylum level
+physeq_phylum_heat <- phyloseq::tax_glom(physeq, taxrank = "Phylum", NArm = FALSE)
+
+# Replace missing phylum names
+tax_table(physeq_phylum_heat)[, "Phylum"][
+  is.na(tax_table(physeq_phylum_heat)[, "Phylum"]) |
+  tax_table(physeq_phylum_heat)[, "Phylum"] == ""
+] <- "Unclassified"
+
+# Transform to relative abundance
+physeq_phylum_heat_rel <- phyloseq::transform_sample_counts(
+  physeq_phylum_heat,
+  function(x) {
+    if (sum(x) == 0) x else x / sum(x)
+  }
+)
+
+# Convert to long format
+heatmap_df <- phyloseq::psmelt(physeq_phylum_heat_rel)
+
+heatmap_df$Phylum[
+  is.na(heatmap_df$Phylum) | heatmap_df$Phylum == ""
+] <- "Unclassified"
+
+heatmap_df <- heatmap_df %>%
+  filter(!is.na(Sample_Type))
+
+# Keep Sample_Type order from metadata
+sample_type_levels <- unique(as.character(sample_data(physeq)$Sample_Type))
+
+# Average relative abundance by Sample_Type and Phylum
+heatmap_summary <- heatmap_df %>%
+  group_by(Sample_Type, Phylum) %>%
+  summarise(
+    Abundance = mean(Abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Make sure all combinations appear
+all_phyla <- unique(heatmap_summary$Phylum)
+
+heatmap_summary <- heatmap_summary %>%
+  tidyr::complete(
+    Sample_Type = factor(sample_type_levels, levels = sample_type_levels),
+    Phylum = all_phyla,
+    fill = list(Abundance = 0)
+  )
+
+# Order phyla by total abundance
+phylum_order <- heatmap_summary %>%
+  group_by(Phylum) %>%
+  summarise(Total = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(Total)) %>%
+  pull(Phylum)
+
+heatmap_summary$Sample_Type <- factor(
+  heatmap_summary$Sample_Type,
+  levels = sample_type_levels
+)
+
+heatmap_summary$Phylum <- factor(
+  heatmap_summary$Phylum,
+  levels = rev(phylum_order)
+)
+
+# Heatmap
+phylum_heatmap_all <- ggplot(
+  heatmap_summary,
+  aes(x = Sample_Type, y = Phylum, fill = Abundance)
+) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  scale_fill_gradient(
+    low = "grey",
+    high = "blue",
+    labels = scales::percent_format(accuracy = 0.1)
+  ) +
+  coord_fixed() +
+  labs(
+    title = "Heatmap of Relative Abundance by Phylum",
+    x = "Sample Type",
+    y = "Phylum",
+    fill = "Relative Abundance"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 65, hjust = 1, size = 5),
+    axis.text.y = element_text(size = 5),
+    axis.title.x = element_text(size = 15),
+    axis.title.y = element_text(size = 15),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10)
+  )
+
+print(phylum_heatmap_all)
+```
+
+```{r HeatmapPhylum3}
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(scales)
+
+# =========================================================
+# Aggregate at Phylum level
+# =========================================================
+physeq_phylum <- phyloseq::tax_glom(physeq, taxrank = "Phylum", NArm = FALSE)
+
+tax_table(physeq_phylum)[, "Phylum"][
+  is.na(tax_table(physeq_phylum)[, "Phylum"]) |
+  tax_table(physeq_phylum)[, "Phylum"] == ""
+] <- "Unclassified"
+
+# =========================================================
+# Convert to relative abundance per sample
+# =========================================================
+physeq_phylum_rel <- phyloseq::transform_sample_counts(
+  physeq_phylum,
+  function(x) {
+    if (sum(x) == 0) x else x / sum(x)
+  }
+)
+
+# =========================================================
+# Melt to long format
+# =========================================================
+phylum_df <- phyloseq::psmelt(physeq_phylum_rel)
+
+phylum_df$Phylum[
+  is.na(phylum_df$Phylum) | phylum_df$Phylum == ""
+] <- "Unclassified"
+
+phylum_df <- phylum_df %>%
+  filter(!is.na(Sample_Type))
+
+# =========================================================
+# Keep top 30 phyla by total abundance
+# =========================================================
+top_phyla <- phylum_df %>%
+  group_by(Phylum) %>%
+  summarise(Total = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(Total)) %>%
+  slice(1:30) %>%
+  pull(Phylum)
+
+phylum_df <- phylum_df %>%
+  filter(Phylum %in% top_phyla)
+
+# =========================================================
+# Sample order
+# =========================================================
+sample_order <- sample_data(physeq)$Sample_Type %>%
+  as.character()
+
+sample_names_ordered <- rownames(sample_data(physeq))
+
+# If you want grouped ordering by Sample_Type:
+sample_info <- data.frame(
+  Sample = rownames(sample_data(physeq)),
+  Sample_Type = as.character(sample_data(physeq)$Sample_Type),
+  stringsAsFactors = FALSE
+)
+
+sample_info <- sample_info %>%
+  arrange(Sample_Type, Sample)
+
+sample_order <- sample_info$Sample
+
+phylum_df$Sample <- factor(phylum_df$Sample, levels = sample_order)
+
+# =========================================================
+# Order phyla by total abundance
+# =========================================================
+phylum_order <- phylum_df %>%
+  group_by(Phylum) %>%
+  summarise(Total = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(Total)) %>%
+  pull(Phylum)
+
+phylum_df$Phylum <- factor(phylum_df$Phylum, levels = rev(phylum_order))
+
+# =========================================================
+# Add log-transformed abundance for better contrast
+# small pseudocount avoids log(0)
+# =========================================================
+phylum_df <- phylum_df %>%
+  mutate(LogAbundance = log10(Abundance + 1e-4))
+
+# =========================================================
+# Create positions for red separator lines between Sample_Type groups
+# =========================================================
+group_sizes <- sample_info %>%
+  count(Sample_Type)
+
+separator_positions <- cumsum(group_sizes$n) + 0.5
+separator_positions <- separator_positions[-length(separator_positions)]
+
+# Midpoints for group labels
+group_centers <- data.frame(
+  Sample_Type = group_sizes$Sample_Type,
+  x = cumsum(group_sizes$n) - group_sizes$n / 2
+)
+
+# =========================================================
+# Plot
+# =========================================================
+phylum_heatmap_samples <- ggplot(
+  phylum_df,
+  aes(x = Sample, y = Phylum, fill = LogAbundance)
+) +
+  geom_tile(color = "black", linewidth = 0.15) +
+  geom_vline(
+    xintercept = separator_positions,
+    color = "red",
+    linewidth = 0.6
+  ) +
+  scale_fill_gradient(
+    low = "black",
+    high = "#6bb6ff",
+    name = "Abundance",
+    breaks = log10(c(1e-4, 1e-3, 1e-2, 1e-1)),
+    labels = c("0.01%", "0.1%", "1%", "10%")
+  ) +
+  labs(
+    title = "Phylum Abundance Heatmap by Sample",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "black", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.grid = element_blank(),
+    axis.text.x = element_text(
+      angle = 90,
+      vjust = 0.5,
+      hjust = 1,
+      size = 7
+    ),
+    axis.text.y = element_text(size = 7),
+    axis.title = element_blank(),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 9)
+  )
+
+phylum_heatmap_samples <- phylum_heatmap_samples +
+  annotate(
+    "text",
+    x = group_centers$x,
+    y = 1,
+    label = group_centers$Sample_Type,
+    color = "red",
+    size = 4,
+    fontface = "bold",
+    vjust = 1.5
+  )
+
+print(phylum_heatmap_samples)
+```
+
+# =========================================================
+
+# Heatmap of Relative Abundance at Genus Level
+
+# =========================================================
+
+```{r HeatmapGenus}
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(scales)
+
+# Aggregate at Genus level
+physeq_heatmap <- phyloseq::tax_glom(physeq, taxrank = "Genus", NArm = FALSE)
+
+tax_table(physeq_heatmap)[, "Genus"][
+  is.na(tax_table(physeq_heatmap)[, "Genus"])
+] <- "Unclassified"
+
+# Convert to relative abundance
+physeq_heatmap_rel <- phyloseq::transform_sample_counts(
+  physeq_heatmap,
+  function(x) {
+    if (sum(x) == 0) x else x / sum(x)
+  }
+)
+
+heatmap_df <- phyloseq::psmelt(physeq_heatmap_rel)
+
+heatmap_df$Genus[
+  is.na(heatmap_df$Genus) | heatmap_df$Genus == ""
+] <- "Unclassified"
+
+# Keep only top 10 genera overall
+top10_genera <- heatmap_df %>%
+  group_by(Genus) %>%
+  summarise(TotalAbundance = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(TotalAbundance)) %>%
+  slice(1:10) %>%
+  pull(Genus)
+
+heatmap_df <- heatmap_df %>%
+  filter(Genus %in% top10_genera)
+
+# Average abundance by Sample_Type and Genus
+heatmap_summary <- heatmap_df %>%
+  group_by(Sample_Type, Genus) %>%
+  summarise(
+    Abundance = mean(Abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Keep sample types in original order
+sample_type_levels <- unique(as.character(sample_data(physeq)$Sample_Type))
+
+heatmap_summary$Sample_Type <- factor(
+  heatmap_summary$Sample_Type,
+  levels = sample_type_levels
+)
+
+# Order genera by total abundance
+genus_order <- heatmap_summary %>%
+  group_by(Genus) %>%
+  summarise(Total = sum(Abundance), .groups = "drop") %>%
+  arrange(desc(Total)) %>%
+  pull(Genus)
+
+heatmap_summary$Genus <- factor(
+  heatmap_summary$Genus,
+  levels = rev(genus_order)
+)
+
+genus_heatmap <- ggplot(
+  heatmap_summary,
+  aes(x = Sample_Type, y = Genus, fill = Abundance)
+) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  scale_fill_gradient(
+    low = "lightyellow",
+    high = "darkred",
+    labels = percent_format(accuracy = 1)
+  ) +
+  labs(
+    title = "Heatmap of Top 10 Genera Relative Abundance",
+    x = "Sample Type",
+    y = "Genus",
+    fill = "Relative\nAbundance"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(
+      angle = 35,
+      hjust = 1,
+      vjust = 1,
+      size = 10,
+      margin = margin(t = 8)
+    ),
+    axis.text.y = element_text(size = 9),
+    axis.title.x = element_text(
+      size = 15,
+      margin = margin(t = 25)
+    ),
+    axis.title.y = element_text(
+      size = 15,
+      margin = margin(r = 20)
+    ),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    plot.margin = margin(20, 20, 40, 20)
+  )
+
+print(genus_heatmap)
+```
+
+```{r HeatmapGenus2}
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(scales)
+
+# Aggregate counts at Genus level
+physeq_genus_heat <- phyloseq::tax_glom(physeq, taxrank = "Genus", NArm = FALSE)
+
+# Replace missing genus names
+tax_table(physeq_genus_heat)[, "Genus"][
+  is.na(tax_table(physeq_genus_heat)[, "Genus"]) |
+  tax_table(physeq_genus_heat)[, "Genus"] == ""
+] <- "Unclassified"
+
+# Transform to relative abundance
+physeq_genus_heat_rel <- phyloseq::transform_sample_counts(
+  physeq_genus_heat,
+  function(x) {
+    if (sum(x) == 0) x else x / sum(x)
+  }
+)
+
+# Convert to long format
+heatmap_df <- phyloseq::psmelt(physeq_genus_heat_rel)
+
+heatmap_df$Genus[
+  is.na(heatmap_df$Genus) | heatmap_df$Genus == ""
+] <- "Unclassified"
+
+heatmap_df <- heatmap_df %>%
+  filter(!is.na(Sample_Type))
+
+# Keep Sample_Type order from metadata
+sample_type_levels <- unique(as.character(sample_data(physeq)$Sample_Type))
+
+# Keep top 30 genera by total abundance
+top_genera <- heatmap_df %>%
+  group_by(Genus) %>%
+  summarise(Total = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(Total)) %>%
+  slice(1:30) %>%
+  pull(Genus)
+
+heatmap_df <- heatmap_df %>%
+  filter(Genus %in% top_genera)
+
+# Average relative abundance by Sample_Type and Genus
+heatmap_summary <- heatmap_df %>%
+  group_by(Sample_Type, Genus) %>%
+  summarise(
+    Abundance = mean(Abundance, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Make sure all combinations appear
+heatmap_summary <- heatmap_summary %>%
+  tidyr::complete(
+    Sample_Type = factor(sample_type_levels, levels = sample_type_levels),
+    Genus = top_genera,
+    fill = list(Abundance = 0)
+  )
+
+# Order genera by total abundance
+genus_order <- heatmap_summary %>%
+  group_by(Genus) %>%
+  summarise(Total = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(Total)) %>%
+  pull(Genus)
+
+heatmap_summary$Sample_Type <- factor(
+  heatmap_summary$Sample_Type,
+  levels = sample_type_levels
+)
+
+heatmap_summary$Genus <- factor(
+  heatmap_summary$Genus,
+  levels = rev(genus_order)
+)
+
+# Heatmap
+genus_heatmap_clean <- ggplot(
+  heatmap_summary,
+  aes(x = Sample_Type, y = Genus, fill = Abundance)
+) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  scale_fill_gradient(
+  low = "grey90",
+  high = "blue",
+  limits = c(0, 0.10),
+  breaks = c(0, 0.025, 0.05, 0.075, 0.10),
+  labels = c("0%", "2.5%", "5%", "7.5%", "10%")
+) +
+  labs(
+    title = "Heatmap of Relative Abundance by Genus (Top 30)",
+    x = "Sample Type",
+    y = "Genus",
+    fill = "Relative Abundance"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(
+      angle = 35,
+      hjust = 1,
+      vjust = 1,
+      size = 10,
+      margin = margin(t = 8)
+    ),
+    axis.text.y = element_text(size = 5),
+    axis.title.x = element_text(size = 15, margin = margin(t = 25)),
+    axis.title.y = element_text(size = 15, margin = margin(r = 20)),
+    plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 10),
+    plot.margin = margin(20, 20, 40, 20)
+  )
+
+print(genus_heatmap_clean)
+```
+
+```{r HeatmapGenus3}
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(scales)
+
+# =========================================================
+# Aggregate at Genus level
+# =========================================================
+physeq_genus <- phyloseq::tax_glom(physeq, taxrank = "Genus", NArm = FALSE)
+
+tax_table(physeq_genus)[, "Genus"][
+  is.na(tax_table(physeq_genus)[, "Genus"]) |
+  tax_table(physeq_genus)[, "Genus"] == ""
+] <- "Unclassified"
+
+# =========================================================
+# Convert to relative abundance per sample
+# =========================================================
+physeq_genus_rel <- phyloseq::transform_sample_counts(
+  physeq_genus,
+  function(x) {
+    if (sum(x) == 0) x else x / sum(x)
+  }
+)
+
+# =========================================================
+# Melt to long format
+# =========================================================
+genus_df <- phyloseq::psmelt(physeq_genus_rel)
+
+genus_df$Genus[
+  is.na(genus_df$Genus) | genus_df$Genus == ""
+] <- "Unclassified"
+
+genus_df <- genus_df %>%
+  filter(!is.na(Sample_Type))
+
+# =========================================================
+# Keep top 30 genera by total abundance
+# =========================================================
+top_genera <- genus_df %>%
+  group_by(Genus) %>%
+  summarise(Total = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(Total)) %>%
+  slice(1:30) %>%
+  pull(Genus)
+
+genus_df <- genus_df %>%
+  filter(Genus %in% top_genera)
+
+# =========================================================
+# Sample order
+# =========================================================
+sample_order <- sample_data(physeq)$Sample_Type %>%
+  as.character()
+
+sample_names_ordered <- rownames(sample_data(physeq))
+
+# If you want grouped ordering by Sample_Type:
+sample_info <- data.frame(
+  Sample = rownames(sample_data(physeq)),
+  Sample_Type = as.character(sample_data(physeq)$Sample_Type),
+  stringsAsFactors = FALSE
+)
+
+sample_info <- sample_info %>%
+  arrange(Sample_Type, Sample)
+
+sample_order <- sample_info$Sample
+
+genus_df$Sample <- factor(genus_df$Sample, levels = sample_order)
+
+# =========================================================
+# Order genera by total abundance
+# =========================================================
+genus_order <- genus_df %>%
+  group_by(Genus) %>%
+  summarise(Total = sum(Abundance, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(Total)) %>%
+  pull(Genus)
+
+genus_df$Genus <- factor(genus_df$Genus, levels = rev(genus_order))
+
+# =========================================================
+# Add log-transformed abundance for better contrast
+# small pseudocount avoids log(0)
+# =========================================================
+genus_df <- genus_df %>%
+  mutate(LogAbundance = log10(Abundance + 1e-4))
+
+# =========================================================
+# Create positions for red separator lines between Sample_Type groups
+# =========================================================
+group_sizes <- sample_info %>%
+  count(Sample_Type)
+
+separator_positions <- cumsum(group_sizes$n) + 0.5
+separator_positions <- separator_positions[-length(separator_positions)]
+
+# Midpoints for group labels
+group_centers <- data.frame(
+  Sample_Type = group_sizes$Sample_Type,
+  x = cumsum(group_sizes$n) - group_sizes$n / 2
+)
+
+# =========================================================
+# Plot
+# =========================================================
+genus_heatmap_samples <- ggplot(
+  genus_df,
+  aes(x = Sample, y = Genus, fill = LogAbundance)
+) +
+  geom_tile(color = "black", linewidth = 0.15) +
+  geom_vline(
+    xintercept = separator_positions,
+    color = "red",
+    linewidth = 0.6
+  ) +
+  scale_fill_gradient(
+    low = "black",
+    high = "#6bb6ff",
+    name = "Abundance",
+    breaks = log10(c(1e-4, 1e-3, 1e-2, 1e-1)),
+    labels = c("0.01%", "0.1%", "1%", "10%")
+  ) +
+  labs(
+    title = "Genus Abundance Heatmap by Sample",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "black", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.grid = element_blank(),
+    axis.text.x = element_text(
+      angle = 90,
+      vjust = 0.5,
+      hjust = 1,
+      size = 7
+    ),
+    axis.text.y = element_text(size = 7),
+    axis.title = element_blank(),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 9)
+  )
+genus_heatmap_samples <- genus_heatmap_samples +
+  annotate(
+    "text",
+    x = group_centers$x,
+    y = 1,
+    label = group_centers$Sample_Type,
+    color = "red",
+    size = 4,
+    fontface = "bold",
+    vjust = 1.5
+  )
+print(genus_heatmap_samples)
+```
